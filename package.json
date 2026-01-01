@@ -4,7 +4,10 @@
   "description": "Wait for a number of seconds",
   "main": "sleep.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "eslint --max-warnings 0 \"**/*.js\"",
+    "lint:fix": "eslint --fix --max-warnings 0 \"**/*.js\"",
+    "pretest": "npm run lint",
+    "test": "echo \"ok\""
   },
   "repository": {
     "type": "git",
@@ -15,5 +18,10 @@
   "bugs": {
     "url": "https://github.com/StrictlySkyler/harbormaster-sleep/issues"
   },
-  "homepage": "https://github.com/StrictlySkyler/harbormaster-sleep#readme"
+  "homepage": "https://github.com/StrictlySkyler/harbormaster-sleep#readme",
+  "devDependencies": {
+    "@babel/core": "^7.23.6",
+    "@babel/eslint-parser": "^7.23.3",
+    "eslint": "^8.55.0"
+  }
 }

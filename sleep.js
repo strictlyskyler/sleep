@@ -43,10 +43,10 @@
     render_work_preview: function (manifest) {
       return `
         <p>Sleep for <span class="pre">${
-          manifest.seconds
-        }</span> seconds, then exit with ${
-          parseInt(manifest.exit_code, 10) ? 'an Error' : 'Success'
-        }.</p>
+  manifest.seconds
+  }</span> seconds, then exit with ${
+    parseInt(manifest.exit_code, 10) ? 'an Error' : 'Success'
+  }.</p>
       `;
     },
 
