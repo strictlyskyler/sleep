@@ -75,13 +75,13 @@
       }
 
       try {
-        setTimeout(function () {
+        setTimeout(async function () {
           console.log(`Finished sleeping for ${
             manifest.seconds
           } seconds with exit code ${
             exit_code
           }`);
-          const shipment = Shipments.findOne(manifest.shipment_id);
+          const shipment = await Shipments.findOneAsync(manifest.shipment_id);
           if (shipment && shipment.exit_code) {
             console.log(`Prior exit code found: ${shipment.exit_code}`);
             exit_code = shipment.exit_code;
