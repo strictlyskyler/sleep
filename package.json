@@ -7,7 +7,7 @@
     "lint": "eslint --max-warnings 0 \"**/*.js\"",
     "lint:fix": "eslint --fix --max-warnings 0 \"**/*.js\"",
     "pretest": "npm run lint",
-    "test": "echo \"ok\""
+    "test": "node --test test/sleep.test.js"
   },
   "repository": {
     "type": "git",
