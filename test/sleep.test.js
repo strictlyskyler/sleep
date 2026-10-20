@@ -22,18 +22,20 @@ const makeCollections = (documents, harbor) => {
     },
     shipments: {
       find: ({ lane: laneId, active }) => ({
-        fetchAsync: async () => [...saved.values()].filter(doc =>
-          doc.lane === laneId && doc.active === active,
+        fetchAsync: async () => structuredClone(
+          [...saved.values()].filter(doc =>
+            doc.lane === laneId && doc.active === active,
+          ),
         ),
       }),
-      findOneAsync: async id => saved.get(id),
+      findOneAsync: async id => structuredClone(saved.get(id)),
       updateAsync: async (selector, modifier) => {
         const doc = saved.get(selector._id);
         if (!doc) return 0;
         if (selector.active !== undefined && doc.active !== selector.active) {
           return 0;
         }
-        Object.assign(doc, modifier.$set);
+        Object.assign(doc, structuredClone(modifier.$set));
         return 1;
       },
     },
@@ -43,9 +45,12 @@ const makeCollections = (documents, harbor) => {
 const installTimers = (t) => {
   const originalSetTimeout = global.setTimeout;
   const originalClearTimeout = global.clearTimeout;
+  const originalNow = Date.now;
+  let now = Date.now();
   const pending = [];
+  Date.now = () => now;
   global.setTimeout = (callback, delay) => {
-    const timer = { callback, delay };
+    const timer = { callback, delay, due: now + delay };
     pending.push(timer);
     return timer;
   };
@@ -56,12 +61,14 @@ const installTimers = (t) => {
   t.after(() => {
     global.setTimeout = originalSetTimeout;
     global.clearTimeout = originalClearTimeout;
+    Date.now = originalNow;
   });
   return {
     pending,
     runNext: async () => {
       const timer = pending.shift();
       assert.ok(timer, 'expected a scheduled timer');
+      now = Math.max(now, timer.due);
       await timer.callback();
     },
   };
@@ -86,6 +93,11 @@ test('update accepts valid seconds and rejects invalid input', () => {
   assert.equal(sleep.update(lane, { seconds: '' }), false);
   assert.equal(sleep.update(lane, { seconds: 'invalid' }), false);
   assert.equal(sleep.update(lane, { seconds: '-1' }), false);
+  assert.equal(sleep.update(lane, { seconds: [] }), false);
+  assert.equal(sleep.update(lane, { seconds: [5] }), false);
+  assert.equal(sleep.update(lane, { seconds: true }), false);
+  assert.equal(sleep.update(lane, { seconds: '0' }), true);
+  assert.equal(sleep.update(lane, { seconds: '0.5' }), true);
 });
 
 test('work saves settings before scheduling', async (t) => {
@@ -262,7 +274,12 @@ test('a startup read failure retries recovery', async (t) => {
 
 test('a failed completion is retried', async (t) => {
   const timers = installTimers(t);
-  installHost(t, async () => { throw new Error('temporary failure'); });
+  let attempts = 0;
+  installHost(t, async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('temporary failure');
+    shipment.active = false;
+  });
   const originalError = console.error;
   console.error = () => {};
   t.after(() => { console.error = originalError; });
@@ -280,6 +297,209 @@ test('a failed completion is retried', async (t) => {
   loadSleep().register(db.lanes, null, db.harbors, db.shipments);
   await flushRecovery();
   await timers.runNext();
+  assert.equal(attempts, 1);
   assert.equal(timers.pending.length, 1);
-  assert.ok(timers.pending[0].delay > 0);
+  assert.equal(timers.pending[0].delay, 30000);
+  await timers.runNext();
+  assert.equal(attempts, 2);
+  assert.equal(shipment.active, false);
+  assert.equal(timers.pending.length, 0);
 });
+
+test('completion keeps the original nested manifest after the caller edits it',
+  async (t) => {
+    const timers = installTimers(t);
+    const calls = [];
+    installHost(t, async (...args) => calls.push(args));
+    const db = makeCollections([], null);
+    const sleep = loadSleep();
+    sleep.register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+    db.saved.set('snapshot', { _id: 'snapshot', lane: lane._id, active: true });
+
+    const manifest = {
+      shipment_id: 'snapshot', seconds: 0.5, exit_code: 0,
+      prior_manifest: { value: 'original' },
+    };
+    await sleep.work(lane, manifest);
+    manifest.prior_manifest.value = 'edited';
+    await timers.runNext();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][3].prior_manifest.value, 'original');
+  });
+
+test('a stale startup query does not replace a timer scheduled by work',
+  async (t) => {
+    const timers = installTimers(t);
+    const calls = [];
+    installHost(t, async (...args) => calls.push(args));
+    const shipment = {
+      _id: 'startup-race', lane: lane._id, active: true,
+      actual: new Date(Date.now() - 10000),
+    };
+    const db = makeCollections([shipment], { lanes: {
+      [lane._id]: { manifest: { seconds: 1, exit_code: 1 } },
+    } });
+    let finishQuery;
+    db.shipments.find = () => ({
+      fetchAsync: () => new Promise(resolve => { finishQuery = resolve; }),
+    });
+    const sleep = loadSleep();
+    sleep.register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+    const staleShipment = structuredClone(shipment);
+
+    await sleep.work(lane, {
+      shipment_id: shipment._id, seconds: 5, exit_code: 0,
+    });
+    finishQuery([staleShipment]);
+    await flushRecovery();
+
+    assert.equal(timers.pending.length, 1);
+    assert.equal(timers.pending[0].delay, 5000);
+    await timers.runNext();
+    assert.equal(calls[0][2], 0);
+  });
+
+test('a recovered timer respects newer saved settings and a zero exit code',
+  async (t) => {
+    const timers = installTimers(t);
+    const calls = [];
+    installHost(t, async (...args) => calls.push(args));
+    const shipment = {
+      _id: 'new-settings', lane: lane._id, active: true,
+      sleep_resume: {
+        deadline: new Date(Date.now() - 1000), exit_code: 1,
+        manifest: { value: 'old' },
+      },
+    };
+    const db = makeCollections([shipment], null);
+    loadSleep().register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+    shipment.sleep_resume = {
+      deadline: new Date(Date.now() + 5000), exit_code: 1,
+      manifest: { value: 'current' },
+    };
+    shipment.exit_code = 0;
+
+    await timers.runNext();
+    assert.equal(calls.length, 0);
+    assert.equal(timers.pending[0].delay, 5000);
+    await timers.runNext();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][2], 0);
+    assert.equal(calls[0][3].value, 'current');
+  });
+
+test('startup recovery waits for work to save its settings', async (t) => {
+  const timers = installTimers(t);
+  installHost(t, async () => assert.fail('work has not finished sleeping'));
+  const shipment = {
+    _id: 'saving', lane: lane._id, active: true,
+    actual: new Date(Date.now() - 10000),
+  };
+  const db = makeCollections([shipment], { lanes: {
+    [lane._id]: { manifest: { seconds: 1, exit_code: 1 } },
+  } });
+  let finishQuery;
+  db.shipments.find = () => ({
+    fetchAsync: () => new Promise(resolve => { finishQuery = resolve; }),
+  });
+  const persist = db.shipments.updateAsync;
+  let finishSave;
+  db.shipments.updateAsync = (...args) => new Promise(resolve => {
+    finishSave = () => resolve(persist(...args));
+  });
+  const sleep = loadSleep();
+  sleep.register(db.lanes, null, db.harbors, db.shipments);
+  await flushRecovery();
+
+  const work = sleep.work(lane, {
+    shipment_id: shipment._id, seconds: 5, exit_code: 0,
+  });
+  finishQuery([structuredClone(shipment)]);
+  await flushRecovery();
+  assert.equal(timers.pending.length, 0);
+
+  finishSave();
+  await work;
+  assert.equal(timers.pending.length, 1);
+  assert.equal(timers.pending[0].delay, 5000);
+});
+
+test('long sleeps wait through the Node timer limit before completing',
+  async (t) => {
+    const timers = installTimers(t);
+    const calls = [];
+    installHost(t, async (...args) => calls.push(args));
+    const shipment = {
+      _id: 'long-sleep', lane: lane._id, active: true,
+      sleep_resume: {
+        deadline: new Date(Date.now() + 2147484147), exit_code: 0,
+        manifest: { seconds: 2147484.147 },
+      },
+    };
+    const db = makeCollections([shipment], null);
+    loadSleep().register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+
+    assert.equal(timers.pending[0].delay, 2147483647);
+    await timers.runNext();
+    assert.equal(calls.length, 0);
+    assert.equal(timers.pending[0].delay, 500);
+    await timers.runNext();
+    assert.equal(calls.length, 1);
+  });
+
+test('work does not schedule a missing or inactive shipment', async (t) => {
+  const timers = installTimers(t);
+  installHost(t, async () => assert.fail('shipment should not complete'));
+  const db = makeCollections([
+    { _id: 'inactive', lane: lane._id, active: false },
+  ], null);
+  const sleep = loadSleep();
+  sleep.register(db.lanes, null, db.harbors, db.shipments);
+  await flushRecovery();
+
+  for (const shipmentId of ['missing', 'inactive']) {
+    await sleep.work(lane, {
+      shipment_id: shipmentId, seconds: 0, exit_code: 0,
+    });
+  }
+  assert.equal(timers.pending.length, 0);
+  assert.equal(db.saved.get('inactive').sleep_resume, undefined);
+});
+
+test('a failed settings write leaves the shipment available for recovery',
+  async (t) => {
+    const timers = installTimers(t);
+    const calls = [];
+    installHost(t, async (...args) => calls.push(args));
+    const db = makeCollections([], { lanes: {
+      [lane._id]: { manifest: { seconds: 5, exit_code: 0 } },
+    } });
+    const sleep = loadSleep();
+    sleep.register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+    db.saved.set('failed-save', {
+      _id: 'failed-save', lane: lane._id, active: true,
+      actual: new Date(Date.now() - 10000),
+    });
+    const persist = db.shipments.updateAsync;
+    db.shipments.updateAsync = async () => {
+      throw new Error('database unavailable');
+    };
+
+    await assert.rejects(sleep.work(lane, {
+      shipment_id: 'failed-save', seconds: 5, exit_code: 0,
+    }), /database unavailable/);
+    assert.equal(timers.pending.length, 0);
+
+    db.shipments.updateAsync = persist;
+    sleep.register(db.lanes, null, db.harbors, db.shipments);
+    await flushRecovery();
+    assert.equal(timers.pending.length, 1);
+    await timers.runNext();
+    assert.equal(calls.length, 1);
+  });

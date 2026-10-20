@@ -6,6 +6,7 @@
   const maxTimeout = 2147483647;
   const retryDelay = 30000;
   const timers = new Map();
+  const starting = new Set();
   const finishing = new Set();
   let Shipments;
 
@@ -26,15 +27,22 @@
         schedule(shipmentId, lane, state);
         return;
       }
-      if (finishing.has(shipmentId)) return;
+      if (starting.has(shipmentId) || finishing.has(shipmentId)) return;
 
       finishing.add(shipmentId);
       try {
         const shipment = await Shipments.findOneAsync(shipmentId);
         if (!shipment || !shipment.active) return;
 
-        const manifest = { ...state.manifest, shipment_id: shipmentId };
-        const exitCode = shipment.exit_code || state.exit_code;
+        const savedState = shipment.sleep_resume || state;
+        if (new Date(savedState.deadline).getTime() > Date.now()) {
+          schedule(shipmentId, lane, savedState);
+          return;
+        }
+        const manifest = {
+          ...structuredClone(savedState.manifest), shipment_id: shipmentId,
+        };
+        const exitCode = shipment.exit_code ?? savedState.exit_code;
         await H.call('Lanes#end_shipment', lane, exitCode, manifest);
       }
       catch (error) {
@@ -65,13 +73,16 @@
 
       for (const shipment of activeShipments) {
         try {
+          // Work may have started while the recovery query was in flight.
+          if (timers.has(shipment._id) || starting.has(shipment._id) ||
+            finishing.has(shipment._id)) continue;
           let state = shipment.sleep_resume;
           if (!state || !state.manifest || !state.deadline) {
             const config = sleepHarbor && sleepHarbor.lanes &&
               sleepHarbor.lanes[lane._id];
             const manifest = config && config.manifest;
             const seconds = manifest && Number(manifest.seconds);
-            if (!Number.isFinite(seconds) || !shipment.actual) {
+            if (!Number.isFinite(seconds) || seconds < 0 || !shipment.actual) {
               throw new Error('No usable sleep settings or start time');
             }
 
@@ -156,9 +167,11 @@
     },
 
     update: function (lane, values) {
-      if (values.seconds === null || values.seconds === undefined ||
-        typeof values.seconds == 'boolean' ||
-        typeof values.seconds == 'string' && !values.seconds.trim()) {
+      if (typeof values.seconds != 'number' &&
+        typeof values.seconds != 'string') {
+        return false;
+      }
+      if (typeof values.seconds == 'string' && !values.seconds.trim()) {
         return false;
       }
       const seconds = Number(values.seconds);
@@ -179,19 +192,24 @@
       const state = {
         deadline: new Date(Date.now() + manifest.seconds * 1000),
         exit_code: parseInt(manifest.exit_code, 10),
-        manifest: { ...manifest },
+        manifest: structuredClone(manifest),
       };
       if (!Number.isFinite(state.deadline.getTime()) ||
         !Number.isFinite(state.exit_code)) {
         throw new TypeError('Invalid sleep deadline or exit code');
       }
-      const updated = await Shipments.updateAsync(
-        { _id: manifest.shipment_id, active: true },
-        { $set: { sleep_resume: state } }
-      );
-      if (updated) schedule(manifest.shipment_id, lane, state);
-
-      return manifest;
+      starting.add(manifest.shipment_id);
+      try {
+        const updated = await Shipments.updateAsync(
+          { _id: manifest.shipment_id, active: true },
+          { $set: { sleep_resume: state } }
+        );
+        if (updated) schedule(manifest.shipment_id, lane, state);
+        return manifest;
+      }
+      finally {
+        starting.delete(manifest.shipment_id);
+      }
     },
 
   };
