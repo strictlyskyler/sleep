@@ -187,6 +187,7 @@ test('recovery and work on independent servers use the same durable settings',
 
 test('work replaces its own existing timer', async (t) => {
   const { sleep, db, timers } = await prepare(t);
+  assert.equal(sleep.replay_safe, true);
   const shipment = create_shipment(db, 'replace', { seconds: 1, exit_code: 0 });
   sleep.work(lane, shipment.manifest, shipment);
   sleep.work(lane, shipment.manifest, shipment);

@@ -57,6 +57,8 @@
   };
 
   return module.exports = {
+    replay_safe: true,
+
     render_input: function (values) {
       values = values || {
         seconds: 1,
