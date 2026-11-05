@@ -167,6 +167,30 @@ test('restart schedules remaining time from the original input', async (t) => {
   assert.equal(calls[0][3].shipment_id, shipment._id);
 });
 
+for (const method of ['work', 'resume']) {
+  test(`${method} preserves typed manifest context`, async (t) => {
+    const { sleep, db, timers, calls } = await prepare(t);
+    class RecordId {
+      constructor (value) { this.value = value; }
+      toHexString () { return this.value; }
+    }
+    const shipment = create_shipment(db, 'typed',
+      { seconds: 0, exit_code: 0 });
+    const read = () => ({ ...shipment, manifest: { ...shipment.manifest,
+      prior_manifest: { record_id: new RecordId('000000000000000000000123') },
+    } });
+    // Collection reads reconstruct the custom types stored in the database.
+    db.shipments.findOneAsync = async () => read();
+    db.shipments.find = () => ({ fetchAsync: async () => [read()] });
+    if (method == 'work') sleep.work(lane, shipment.manifest, read());
+    else await sleep.resume();
+    await timers.runNext();
+    const record_id = calls[0][3].prior_manifest.record_id;
+    assert.ok(record_id instanceof RecordId);
+    assert.equal(record_id.toHexString(), '000000000000000000000123');
+  });
+}
+
 test('recovery and work on independent servers use the same durable settings',
   async (t) => {
     const { sleep, db, timers, calls } = await prepare(t);

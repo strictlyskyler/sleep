@@ -24,7 +24,7 @@
     if (!Number.isFinite(deadline) || !Number.isFinite(exit_code)) {
       throw new TypeError('Invalid sleep deadline or exit code');
     }
-    return { deadline, exit_code, manifest: structuredClone(manifest) };
+    return { deadline, exit_code, manifest };
   };
 
   const schedule = (lane, shipment, retry = false) => {
