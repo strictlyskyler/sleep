@@ -117,6 +117,8 @@
         }).fetchAsync();
         for (const shipment of shipments) {
           if (timers.has(shipment._id)) continue;
+          if (shipment.dispatch?.pending === false &&
+            !shipment.dispatch.started) continue;
           try {
             schedule(lane, shipment);
           }

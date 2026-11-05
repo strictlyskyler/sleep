@@ -194,6 +194,30 @@ test('work replaces its own existing timer', async (t) => {
   assert.equal(timers.pending.length, 1);
 });
 
+test('resume waits for prepared shipments to be activated', async (t) => {
+  const { sleep, db, timers, calls } = await prepare(t);
+  const prepared = create_shipment(db, 'prepared',
+    { seconds: 0, exit_code: 0 });
+  prepared.dispatch = { pending: false };
+  const ready = create_shipment(db, 'ready', { seconds: 0, exit_code: 0 });
+  ready.dispatch = { pending: true };
+  const running = create_shipment(db, 'running', { seconds: 0, exit_code: 0 });
+  running.dispatch = { pending: false, started: new Date() };
+  await sleep.resume();
+  assert.equal(timers.pending.length, 2);
+  await timers.runNext();
+  await timers.runNext();
+  assert.deepEqual(calls.map(call => call[3].shipment_id),
+    ['ready', 'running']);
+  prepared.dispatch.pending = true;
+  ready.active = false;
+  running.active = false;
+  await sleep.resume();
+  assert.equal(timers.pending.length, 1);
+  await timers.runNext();
+  assert.equal(calls[2][3].shipment_id, 'prepared');
+});
+
 test('resume preserves deadlines saved by the previous harbor', async (t) => {
   const { sleep, db, timers, calls } = await prepare(t);
   db.saved.set('previous', {
