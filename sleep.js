@@ -4,7 +4,6 @@
 
   const name = 'sleep';
   const max_timeout = 2147483647;
-  const retry_delay = 30000;
   const timers = new Map();
   let Lanes;
   let Shipments;
@@ -27,37 +26,53 @@
     return { deadline, exit_code, manifest };
   };
 
-  const schedule = (lane, shipment, retry = false) => {
+  const schedule = (lane, shipment) => {
     const state = sleep_state(shipment);
     const shipment_id = shipment._id;
-    if (timers.has(shipment_id)) clearTimeout(timers.get(shipment_id));
-    const delay = retry ? retry_delay :
-      Math.max(0, Math.min(state.deadline - Date.now(), max_timeout));
-    timers.set(shipment_id, setTimeout(async () => {
-      timers.delete(shipment_id);
-      try {
-        const current = await Shipments.findOneAsync(shipment_id);
-        if (!current || !current.active) return;
-        const current_state = sleep_state(current);
-        if (current_state.deadline > Date.now()) {
-          schedule(lane, current);
-          return;
-        }
-        const manifest = {
-          ...current_state.manifest, shipment_id,
-        };
-        await H.call('Lanes#end_shipment', lane,
-          current.exit_code ?? current_state.exit_code, manifest);
+    if (timers.has(shipment_id)) timers.get(shipment_id)();
+    let cancel;
+    const owns_timer = () => timers.get(shipment_id) === cancel;
+    const finish = async () => {
+      const current = await Shipments.findOneAsync(shipment_id);
+      if (!owns_timer()) return;
+      if (!current || !current.active) {
+        timers.delete(shipment_id);
+        return;
       }
+      const current_state = sleep_state(current);
+      if (current_state.deadline > Date.now()) {
+        schedule(lane, current);
+        return;
+      }
+      const manifest = { ...current_state.manifest, shipment_id };
+      await H.call('Lanes#end_shipment', lane,
+        current.exit_code ?? current_state.exit_code, manifest);
+      if (owns_timer()) timers.delete(shipment_id);
+    };
+    const delay = Math.max(0,
+      Math.min(state.deadline - Date.now(), max_timeout));
+    const timer = setTimeout(async () => {
+      try { await finish(); }
       catch (error) {
+        if (!owns_timer()) return;
         console.error(`Unable to finish sleep shipment ${shipment_id}:`, error);
-        schedule(lane, shipment, true);
+        cancel = H.retry(`sleep:${shipment_id}`, finish);
+        timers.set(shipment_id, cancel);
       }
-    }, delay));
+    }, delay);
+    cancel = () => clearTimeout(timer);
+    timers.set(shipment_id, cancel);
+  };
+
+  const resume_shipment = (lane, shipment) => {
+    if (timers.has(shipment._id)) return;
+    schedule(lane, shipment);
   };
 
   return module.exports = {
     replay_safe: true,
+
+    resume_shipment,
 
     render_input: function (values) {
       values = values || {
@@ -116,11 +131,11 @@
           lane: lane._id, active: true,
         }).fetchAsync();
         for (const shipment of shipments) {
-          if (timers.has(shipment._id)) continue;
+          if (shipment.dispatch?.pending) continue;
           if (shipment.dispatch?.pending === false &&
             !shipment.dispatch.started) continue;
           try {
-            schedule(lane, shipment);
+            resume_shipment(lane, shipment);
           }
           catch (error) {
             console.error(`Unable to resume sleep shipment ${
