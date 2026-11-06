@@ -3,9 +3,76 @@
   'use strict';
 
   const name = 'sleep';
+  const max_timeout = 2147483647;
+  const timers = new Map();
+  let Lanes;
   let Shipments;
 
+  const sleep_state = (shipment) => {
+    const saved = shipment.sleep_resume;
+    const manifest = saved ? saved.manifest : shipment.manifest;
+    if (!manifest || !Number.isFinite(manifest.seconds) ||
+      manifest.seconds < 0) {
+      throw new TypeError('Invalid number of seconds to sleep');
+    }
+    const actual = new Date(shipment.actual || NaN).getTime();
+    const deadline = new Date(saved ? saved.deadline || NaN :
+      actual + manifest.seconds * 1000).getTime();
+    const exit_code = saved ? saved.exit_code :
+      parseInt(manifest.exit_code, 10);
+    if (!Number.isFinite(deadline) || !Number.isFinite(exit_code)) {
+      throw new TypeError('Invalid sleep deadline or exit code');
+    }
+    return { deadline, exit_code, manifest };
+  };
+
+  const schedule = (lane, shipment) => {
+    const state = sleep_state(shipment);
+    const shipment_id = shipment._id;
+    if (timers.has(shipment_id)) timers.get(shipment_id)();
+    let cancel;
+    const owns_timer = () => timers.get(shipment_id) === cancel;
+    const finish = async () => {
+      const current = await Shipments.findOneAsync(shipment_id);
+      if (!owns_timer()) return;
+      if (!current || !current.active) {
+        timers.delete(shipment_id);
+        return;
+      }
+      const current_state = sleep_state(current);
+      if (current_state.deadline > Date.now()) {
+        schedule(lane, current);
+        return;
+      }
+      const manifest = { ...current_state.manifest, shipment_id };
+      await H.call('Lanes#end_shipment', lane,
+        current.exit_code ?? current_state.exit_code, manifest);
+      if (owns_timer()) timers.delete(shipment_id);
+    };
+    const delay = Math.max(0,
+      Math.min(state.deadline - Date.now(), max_timeout));
+    const timer = setTimeout(async () => {
+      try { await finish(); }
+      catch (error) {
+        if (!owns_timer()) return;
+        console.error(`Unable to finish sleep shipment ${shipment_id}:`, error);
+        cancel = H.retry(`sleep:${shipment_id}`, finish);
+        timers.set(shipment_id, cancel);
+      }
+    }, delay);
+    cancel = () => clearTimeout(timer);
+    timers.set(shipment_id, cancel);
+  };
+
+  const resume_shipment = (lane, shipment) => {
+    if (timers.has(shipment._id)) return;
+    schedule(lane, shipment);
+  };
+
   return module.exports = {
+    replay_safe: true,
+
+    resume_shipment,
 
     render_input: function (values) {
       values = values || {
@@ -41,64 +108,62 @@
     },
 
     render_work_preview: function (manifest) {
-      return `
-        <p>Sleep for <span class="pre">${
-  manifest.seconds
-  }</span> seconds, then exit with ${
-    parseInt(manifest.exit_code, 10) ? 'an Error' : 'Success'
-  }.</p>
-      `;
+      const exitText = parseInt(manifest.exit_code, 10) ?
+        'an Error' : 'Success';
+      const html = `<p>Sleep for <span class="pre">${
+        manifest.seconds
+      }</span> seconds, then exit with ${
+        exitText
+      }.</p>`;
+      return html;
     },
 
     register: (lanes, users, harbors, shipments) => {
+      Lanes = lanes;
       Shipments = shipments;
       return { name };
     },
 
-    update: function (lane, values) {
-      if (values.seconds) values.seconds = parseInt(values.seconds, 10);
-      values.seconds = values.seconds || false;
-      if (typeof values.seconds == 'number') return true;
-
-      return false;
+    resume: async () => {
+      const lanes = await Lanes.find({ type: name }).fetchAsync();
+      for (const lane of lanes) {
+        const shipments = await Shipments.find({
+          lane: lane._id, active: true,
+        }).fetchAsync();
+        for (const shipment of shipments) {
+          if (shipment.dispatch?.pending) continue;
+          if (shipment.dispatch?.pending === false &&
+            !shipment.dispatch.started) continue;
+          try {
+            resume_shipment(lane, shipment);
+          }
+          catch (error) {
+            console.error(`Unable to resume sleep shipment ${
+              shipment._id}:`, error);
+          }
+        }
+      }
     },
 
-    work: function (lane, manifest) {
-      let exit_code = parseInt(manifest.exit_code, 10);
-
-      if (typeof manifest.seconds != 'number') {
-        throw new TypeError(`
-          Invalid number of seconds to sleep!
-          The manifest must contain a "seconds" member, which must be an
-          integer representing the number of seconds to sleep.
-        `);
+    update: function (lane, values) {
+      if (typeof values.seconds != 'number' &&
+        typeof values.seconds != 'string') {
+        return false;
       }
-
-      try {
-        setTimeout(async function () {
-          console.log(`Finished sleeping for ${
-            manifest.seconds
-          } seconds with exit code ${
-            exit_code
-          }`);
-          const shipment = await Shipments.findOneAsync(manifest.shipment_id);
-          if (shipment && shipment.exit_code) {
-            console.log(`Prior exit code found: ${shipment.exit_code}`);
-            exit_code = shipment.exit_code;
-          }
-          H.call('Lanes#end_shipment', lane, exit_code, manifest);
-        }, manifest.seconds * 1000);
-
+      if (typeof values.seconds == 'string' && !values.seconds.trim()) {
+        return false;
       }
-      catch (err) {
-        console.error(err);
-        manifest.error = err;
-      }
+      const seconds = Number(values.seconds);
+      if (!Number.isFinite(seconds) || seconds < 0) return false;
+      values.seconds = seconds;
+      return true;
+    },
 
+    work: function (lane, manifest, shipment) {
+      sleep_state(shipment);
+      if (!shipment.dispatch?.pending) schedule(lane, shipment);
       return manifest;
-
     },
 
   };
-
 })();
