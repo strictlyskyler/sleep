@@ -251,6 +251,23 @@ test('resume leaves pending dispatches to the core handoff', async (t) => {
   assert.equal(calls[2][3].shipment_id, 'prepared');
 });
 
+test('pending work waits for core to save its return before arming a timer',
+  async (t) => {
+    const { sleep, db, timers, calls } = await prepare(t);
+    const shipment = create_shipment(db, 'pending',
+      { seconds: 0, exit_code: 0 });
+    shipment.dispatch = { pending: true };
+    assert.equal(sleep.work(lane, shipment.manifest, shipment),
+      shipment.manifest);
+    assert.equal(timers.pending.length, 0);
+    sleep.resume_shipment(lane, shipment);
+    await timers.runNext();
+    assert.equal(calls.length, 1);
+    shipment.manifest.seconds = -1;
+    assert.throws(() => sleep.work(lane, shipment.manifest, shipment),
+      /Invalid number/);
+  });
+
 test('resume preserves deadlines saved by the previous harbor', async (t) => {
   const { sleep, db, timers, calls } = await prepare(t);
   db.saved.set('previous', {

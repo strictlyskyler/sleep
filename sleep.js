@@ -160,7 +160,8 @@
     },
 
     work: function (lane, manifest, shipment) {
-      schedule(lane, shipment);
+      sleep_state(shipment);
+      if (!shipment.dispatch?.pending) schedule(lane, shipment);
       return manifest;
     },
 
