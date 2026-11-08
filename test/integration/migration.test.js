@@ -25,6 +25,10 @@ describe('Sleep migration', () => {
       await Lanes.insertAsync({ _id: 'sleep-lane', type: 'sleep' });
       await Harbors.insertAsync({ _id: 'sleep', ...harbor });
       await Shipments.insertAsync(shipment);
+      await Shipments.insertAsync({
+        _id: 'completed', lane: 'deleted-lane', active: false,
+        manifest: { result: 'preserve' }, sleep_resume: { obsolete: true },
+      });
       const script = path.join(path.dirname(process.env.SLEEP_HARBOR_PATH),
         'scripts/migrate-sleep.mjs');
       const env = { ...process.env };
@@ -34,19 +38,30 @@ describe('Sleep migration', () => {
       });
       const preview = run();
       expect(preview.status, preview.stderr).to.eq(0);
-      expect(JSON.parse(preview.stdout)[0].estimated).to.eq(true);
+      const report = JSON.parse(preview.stdout);
+      expect(report.find(row => row.shipment_id == 'legacy').estimated)
+        .to.eq(true);
+      expect(report.find(row => row.shipment_id == 'completed').action)
+        .to.eq('cleanup');
       expect((await Shipments.findOneAsync('legacy')).manifest)
         .to.eq(undefined);
+      expect((await Shipments.findOneAsync('completed')).sleep_resume)
+        .to.deep.eq({ obsolete: true });
       const refused = run('--apply');
       expect(refused.status).to.eq(1);
       expect(refused.stderr).to.include('--acknowledge-current-settings');
       expect((await Shipments.findOneAsync('legacy')).manifest)
         .to.eq(undefined);
+      expect((await Shipments.findOneAsync('completed')).sleep_resume)
+        .to.deep.eq({ obsolete: true });
       const applied = run('--apply', '--acknowledge-current-settings');
       expect(applied.status, applied.stderr).to.eq(0);
-      expect(applied.stdout).to.include('"updated":1');
+      expect(applied.stdout).to.include('"updated":2');
       expect((await Shipments.findOneAsync('legacy')).manifest.seconds)
         .to.eq(5);
+      const cleaned = await Shipments.findOneAsync('completed');
+      expect(cleaned.sleep_resume).to.eq(undefined);
+      expect(cleaned.manifest).to.deep.eq({ result: 'preserve' });
       const repeated = run('--apply');
       expect(repeated.status, repeated.stderr).to.eq(0);
       expect(repeated.stdout).to.include('"updated":0');
@@ -121,6 +136,66 @@ describe('Sleep migration', () => {
     expect(context.binary.value().toString()).to.eq('context');
     expect(saved.sleep_resume.manifest.prior_manifest).to.deep.eq(context);
     expect(saved.sleep_resume.manifest.shipment_id).to.eq(undefined);
+    await raw.updateOne({ _id: shipment._id }, { $set: { active: false } });
+    const cleanup = plan_sleep_migration(await raw.find().toArray());
+    expect((await apply_sleep_migration(raw, cleanup)).updated).to.eq(1);
+    const cleaned = await raw.findOne({ _id: shipment._id });
+    expect(cleaned.sleep_resume).to.eq(undefined);
+    expect(cleaned.manifest).to.deep.eq(saved.manifest);
+    expect(plan_sleep_migration([cleaned]).changes).to.deep.eq([]);
+  });
+
+  it('previews inactive cleanup without requiring valid settings', () => {
+    const inactive = { ...shipment, active: false, sleep_resume: null };
+    const plan = plan_sleep_migration([
+      inactive, { ...shipment, active: false },
+      { _id: 'unknown', sleep_resume: {} },
+    ]);
+    expect(plan.changes).to.deep.eq([{
+      _id: 'legacy', action: 'cleanup', previous: null,
+    }]);
+    expect(plan.report).to.deep.eq([{
+      shipment_id: 'legacy', lane: 'sleep-lane',
+      action: 'cleanup', changes: true,
+    }]);
+    expect(inactive.sleep_resume).to.eq(null);
+  });
+
+  it('cleans inactive legacy state only when unchanged', async () => {
+    const raw = Shipments.rawCollection();
+    const legacy = { deadline: new Date(105000), exit_code: 0,
+      manifest: { seconds: 5, exit_code: 0 },
+    };
+    const ids = ['finished', 'reactivated', 'changed', 'removed', 'active'];
+    for (const id of ids) {
+      await raw.insertOne({
+        ...shipment, _id: id, active: id == 'active',
+        manifest: { result: 'keep' }, sleep_resume: legacy,
+      });
+    }
+    const plan = plan_sleep_migration(await raw.find().toArray());
+    expect(plan.changes.length).to.eq(4);
+    await raw.updateOne({ _id: 'reactivated' }, { $set: { active: true } });
+    await raw.updateOne({ _id: 'changed' }, {
+      $set: { 'sleep_resume.deadline': new Date(200000) },
+    });
+    await raw.updateOne({ _id: 'removed' }, { $unset: { sleep_resume: '' } });
+    const result = await apply_sleep_migration(raw, plan);
+    expect(result.updated).to.eq(1);
+    expect(result.skipped)
+      .to.have.members(['reactivated', 'changed', 'removed']);
+    const cleaned = await raw.findOne({ _id: 'finished' });
+    expect(cleaned.sleep_resume).to.eq(undefined);
+    expect(cleaned.manifest).to.deep.eq({ result: 'keep' });
+    expect((await raw.findOne({ _id: 'reactivated' })).sleep_resume)
+      .to.deep.eq(legacy);
+    expect((await raw.findOne({ _id: 'changed' })).sleep_resume.deadline)
+      .to.deep.eq(new Date(200000));
+    expect((await raw.findOne({ _id: 'active' })).sleep_resume)
+      .to.deep.eq(legacy);
+    const repeated = await apply_sleep_migration(raw, plan);
+    expect(repeated.updated).to.eq(0);
+    expect(repeated.skipped.length).to.eq(4);
   });
 
   it('does not rewrite initialized or inactive shipments', () => {

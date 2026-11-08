@@ -14,7 +14,10 @@ try {
   const db = client.db();
   const lanes = await db.collection('Lanes').find({ type: 'sleep' }).toArray();
   const shipments = await db.collection('Shipments').find({
-    lane: { $in: lanes.map(lane => lane._id) }, active: true,
+    $or: [
+      { lane: { $in: lanes.map(lane => lane._id) }, active: true },
+      { active: false, sleep_resume: { $exists: true } },
+    ],
   }).toArray();
   const harbor = await db.collection('Harbors').findOne({ _id: 'sleep' });
   const plan = plan_sleep_migration(shipments, harbor);

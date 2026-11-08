@@ -36,7 +36,6 @@ const makeCollections = (documents, harbor) => {
           return 0;
         }
         Object.assign(doc, structuredClone(modifier.$set));
-        for (const key of Object.keys(modifier.$unset || {})) delete doc[key];
         return 1;
       },
     },
@@ -285,93 +284,27 @@ test('resume preserves deadlines saved by the previous harbor', async (t) => {
   assert.equal(calls[0][3].prior_manifest, 'original');
 });
 
-test('Sleep removes legacy state after successful completion', async (t) => {
-  const { sleep, db, timers, calls } = await prepare(t);
-  const shipment = create_shipment(db, 'legacy', { seconds: 0, exit_code: 0 });
-  shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
-    manifest: shipment.manifest,
-  };
-  global.H.call = async (...args) => {
-    calls.push(args);
-    assert.ok(shipment.sleep_resume);
-    shipment.active = false;
-  };
-  await sleep.resume();
-  await timers.runNext();
-  assert.equal(calls.length, 1);
-  assert.equal(shipment.sleep_resume, undefined);
-  assert.equal(shipment.manifest.shipment_id, 'legacy');
-});
-
-test('legacy cleanup retries after completion without repeating it',
-  async (t) => {
-    const { sleep, db, timers, calls, retries } = await prepare(t);
-    const original = console.error;
-    console.error = () => {};
-    t.after(() => { console.error = original; });
-    const shipment = create_shipment(db, 'cleanup',
-      { seconds: 0, exit_code: 0 });
-    shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
-      manifest: shipment.manifest,
-    };
-    global.H.call = async (...args) => {
-      calls.push(args);
-      shipment.active = false;
-    };
-    const update = db.shipments.updateAsync;
-    db.shipments.updateAsync = async () => { throw new Error('unavailable'); };
-    await sleep.resume();
-    await timers.runNext();
-    assert.equal(retries.length, 1);
-    assert.ok(shipment.sleep_resume);
-    db.shipments.updateAsync = update;
-    await retries[0].work();
-    assert.equal(shipment.sleep_resume, undefined);
-    assert.equal(calls.length, 1);
-  });
-
-test('legacy cleanup leaves a shipment active until core finishes it',
-  async (t) => {
-    const { sleep, db, timers } = await prepare(t);
-    const shipment = create_shipment(db, 'still-active',
-      { seconds: 0, exit_code: 0 });
-    shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
-      manifest: shipment.manifest,
-    };
-    await sleep.resume();
-    await timers.runNext();
-    assert.ok(shipment.sleep_resume);
-    assert.equal(shipment.active, true);
-  });
-
-test('late legacy cleanup does not discard a replacement timer', async (t) => {
-  const { sleep, db, timers } = await prepare(t);
-  const shipment = create_shipment(db, 'cleanup-replaced',
-    { seconds: 0, exit_code: 0 });
-  shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
-    manifest: shipment.manifest,
-  };
-  const update = db.shipments.updateAsync;
-  let entered;
-  let release;
-  const started = new Promise(resolve => { entered = resolve; });
-  db.shipments.updateAsync = async (...args) => {
-    entered();
-    await new Promise(resolve => { release = resolve; });
-    return update(...args);
-  };
-  sleep.work(lane, shipment.manifest, shipment);
-  shipment.active = false;
-  const cleaning = timers.runNext();
-  await started;
-  shipment.active = true;
-  sleep.work(lane, shipment.manifest, shipment);
-  release();
-  await cleaning;
-  sleep.resume_shipment(lane, shipment);
-  assert.equal(timers.pending.length, 1);
-  assert.ok(shipment.sleep_resume);
-  db.shipments.updateAsync = update;
+[false, true].forEach(active => {
+  test(`legacy cleanup stays out of timer completion: active=${active}`,
+    async (t) => {
+      const { sleep, db, timers, calls, retries } = await prepare(t);
+      const shipment = create_shipment(db, 'legacy',
+        { seconds: 0, exit_code: 0 });
+      shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
+        manifest: shipment.manifest,
+      };
+      db.shipments.updateAsync = () => assert.fail('unexpected cleanup write');
+      await sleep.resume();
+      shipment.active = active;
+      global.H.call = async (...args) => {
+        calls.push(args);
+        shipment.active = false;
+      };
+      await timers.runNext();
+      assert.equal(calls.length, active ? 1 : 0);
+      assert.equal(retries.length, 0);
+      assert.ok(shipment.sleep_resume);
+    });
 });
 
 test('invalid records are reported without preventing other recovery',

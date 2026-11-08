@@ -10,13 +10,6 @@
   let Lanes;
   let Shipments;
 
-  const clear_legacy_state = async (shipment) => {
-    if (!shipment?.sleep_resume) return;
-    await Shipments.updateAsync({ _id: shipment._id, active: false }, {
-      $unset: { sleep_resume: '' },
-    });
-  };
-
   const sleep_state = (shipment) => {
     const saved = shipment.sleep_resume;
     const manifest = saved ? saved.manifest : shipment.manifest;
@@ -45,8 +38,7 @@
       const current = await Shipments.findOneAsync(shipment_id);
       if (!owns_timer()) return;
       if (!current || !current.active) {
-        await clear_legacy_state(current);
-        if (owns_timer()) timers.delete(shipment_id);
+        timers.delete(shipment_id);
         return;
       }
       const current_state = sleep_state(current);
@@ -57,7 +49,6 @@
       const manifest = { ...current_state.manifest, shipment_id };
       await H.call('Lanes#end_shipment', lane,
         current.exit_code ?? current_state.exit_code, manifest);
-      await clear_legacy_state(current);
       if (owns_timer()) timers.delete(shipment_id);
     };
     const delay = Math.max(0,

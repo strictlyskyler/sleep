@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 import fs from 'fs';
+import { plan_sleep_migration, apply_sleep_migration } from './migration';
 import vm from 'vm';
 import H from '../../startup/config/namespace';
 import { resetDatabase } from '../../test-helpers/reset-database';
@@ -178,7 +179,7 @@ describe('Sleep and core recovery integration', () => {
     expect(work).to.eq(0);
   });
 
-  it('cleans up legacy state after completing through the generic core',
+  it('leaves completed legacy state for the offline migration',
     async () => {
       await Shipments.insertAsync({
         _id: 'source', lane: 'sleeper', active: true,
@@ -191,8 +192,15 @@ describe('Sleep and core recovery integration', () => {
       await tick();
       const saved = await Shipments.findOneAsync('source');
       expect(saved.active).to.eq(false);
-      expect(saved.sleep_resume).to.eq(undefined);
+      expect(saved.sleep_resume).to.exist;
       expect(followups).to.eq(1);
+      const plan = plan_sleep_migration([saved]);
+      expect(plan.report[0].action).to.eq('cleanup');
+      expect((await apply_sleep_migration(Shipments.rawCollection(), plan))
+        .updated).to.eq(1);
+      const cleaned = await Shipments.findOneAsync('source');
+      expect(cleaned.sleep_resume).to.eq(undefined);
+      expect(cleaned.manifest).to.deep.eq(saved.manifest);
     });
 
   it('resumes a settled active dispatch after losing process timers',
