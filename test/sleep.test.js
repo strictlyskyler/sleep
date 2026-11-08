@@ -284,6 +284,29 @@ test('resume preserves deadlines saved by the previous harbor', async (t) => {
   assert.equal(calls[0][3].prior_manifest, 'original');
 });
 
+[false, true].forEach(active => {
+  test(`legacy cleanup stays out of timer completion: active=${active}`,
+    async (t) => {
+      const { sleep, db, timers, calls, retries } = await prepare(t);
+      const shipment = create_shipment(db, 'legacy',
+        { seconds: 0, exit_code: 0 });
+      shipment.sleep_resume = { deadline: new Date(Date.now()), exit_code: 0,
+        manifest: shipment.manifest,
+      };
+      db.shipments.updateAsync = () => assert.fail('unexpected cleanup write');
+      await sleep.resume();
+      shipment.active = active;
+      global.H.call = async (...args) => {
+        calls.push(args);
+        shipment.active = false;
+      };
+      await timers.runNext();
+      assert.equal(calls.length, active ? 1 : 0);
+      assert.equal(retries.length, 0);
+      assert.ok(shipment.sleep_resume);
+    });
+});
+
 test('invalid records are reported without preventing other recovery',
   async (t) => {
     const { sleep, db, timers } = await prepare(t);

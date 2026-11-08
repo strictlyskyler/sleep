@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout core
+        uses: actions/checkout@v4
+        with:
+          repository: harbormaster-public/harbormaster
+          ref: ad7291d208f4826c76052bd47675d4c3d39d9f51
+          path: .integration/core
+      - name: Install Meteor
+        run: |
+          curl https://install.meteor.com/ | sh
+          echo "$HOME/.meteor" >> $GITHUB_PATH
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3-setuptools python3-venv
+      - run: meteor npm ci
+      - run: meteor npm ci
+        working-directory: .integration/core
+      - run: npm run test:integration
+        env:
+          HARBORMASTER_PATH: ${{ github.workspace }}/.integration/core
