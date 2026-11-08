@@ -4,10 +4,12 @@
   "description": "Wait for a number of seconds",
   "main": "sleep.js",
   "scripts": {
-    "lint": "eslint --max-warnings 0 \"**/*.js\"",
-    "lint:fix": "eslint --fix --max-warnings 0 \"**/*.js\"",
+    "lint": "eslint --max-warnings 0 \"**/*.{js,mjs}\"",
+    "lint:fix": "eslint --fix --max-warnings 0 \"**/*.{js,mjs}\"",
     "pretest": "npm run lint",
-    "test": "node --test --experimental-test-coverage --test-coverage-include=sleep.js --test-coverage-lines=100 --test-coverage-functions=100 --test-coverage-branches=100 test/sleep.test.js"
+    "test": "node --test --experimental-test-coverage --test-coverage-include=sleep.js --test-coverage-lines=100 --test-coverage-functions=100 --test-coverage-branches=100 test/sleep.test.js",
+    "migrate": "node scripts/migrate-sleep.mjs",
+    "test:integration": "node scripts/test-integration.js"
   },
   "repository": {
     "type": "git",
@@ -22,6 +24,7 @@
   "devDependencies": {
     "@babel/core": "^7.23.6",
     "@babel/eslint-parser": "^7.23.3",
-    "eslint": "^8.55.0"
+    "eslint": "^8.55.0",
+    "mongodb": "^6.19.0"
   }
 }
