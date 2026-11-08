@@ -3,6 +3,8 @@
   'use strict';
 
   const name = 'sleep';
+  // Node's setTimeout limit is 2^31 - 1 ms, even on 64-bit runtimes.
+  // Larger delays become 1 ms, so longer sleeps are scheduled in chunks.
   const max_timeout = 2147483647;
   const timers = new Map();
   let Lanes;
